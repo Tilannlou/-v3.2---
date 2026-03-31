@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>雲霓幻夢｜架構即美學</title>
+    <link rel="stylesheet" href="css/blue.css">
+</head>
+<body>
+    
+    <!-- 🔹 側邊欄 -->
+    <div class="sidebar">
+        <div>
+            <h1>雲霓幻夢｜架構即美學</h1>
+            <p style="font-size: 0.8rem; color: #64748b;">技術不只是工具，而是詩意的延伸 (測試版)</p>
+        </div>
+
+        <div class="status-box">
+            <h2>🧠 模型狀態</h2>
+            <div class="status-item"><span>狀態</span><span id="model-status" class="status-value">檢測中...</span></div>
+            <div class="status-item"><span>模型</span><span id="model-name">-</span></div>
+            <div class="status-item"><span>顯存</span><span id="gpu-memory">-</span></div>
+            <div class="status-item"><span>端口</span><span>8000</span></div>
+        </div>
+
+        <div class="control-group">
+            <h2>🎛️ 生成參數</h2>
+            <label>Temperature</label>
+            <input type="number" id="temperature" value="0.7" step="0.1" min="0" max="2">
+            <label>Top P</label>
+            <input type="number" id="top_p" value="0.9" step="0.1" min="0" max="1">
+            <label>Max Tokens</label>
+            <input type="number" id="max_tokens" value="2048" step="64" min="1" max="262144">
+            <label>Repetition Penalty</label>
+            <input type="number" id="repetition_penalty" value="1.15" step="0.05" min="1" max="2">
+        </div>
+
+        <div class="control-group">
+            <h2>🧠 System Prompt</h2>
+            <textarea id="system-prompt" placeholder="輸入系統提示詞..."></textarea>
+        </div>
+
+        <div class="control-group" style="flex: 1; display: flex; flex-direction: column;">
+            <h2>📊 系統日誌</h2>
+            <div id="log-box" class="log-box">
+                <div class="log-entry">等待連接...</div>
+            </div>
+        </div>
+
+        <div style="font-size: 0.75rem; color: #475569; text-align: center;">
+            © 2026 雲霓幻夢 | 美學與技術的交融
+        </div>
+    </div>
+
+    <!-- 🔹 主對話區 -->
+    <div class="main-content">
+        <div class="chat-container" id="chat-container">
+            <!-- 歡迎訊息 -->
+            <div class="message ai">
+                <div class="think-block" style="display:none;"></div>
+                <div class="content">您好，我是您的本地 AI 助手。系統已就緒，請問有什麼可以幫您？✨</div>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <textarea id="user-input" placeholder="輸入消息... (Shift+Enter 換行)" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendMessage();}"></textarea>
+            <button id="send-btn">發送</button>
+        </div>
+    </div>
+
+    <!-- 🔹 JavaScript -->
+    <script>
+        // ==================== 配置 ====================
+        const API_BASE = "http://localhost:8000";
+        const HEALTH_URL = `${API_BASE}/health`;
+        const CHAT_URL = `${API_BASE}/v1/chat/completions`;
+        const SESSION_ID = "web_blue_002";
+        
+        let conversationHistory = [];
+        // 🔹 狀態管理（防止重複發送）
+        let messages = [];
+        let isSending = false;
+        let isInitialized = false;
+        let currentLoadingMessage = null;
+        // ==================== 日誌系統 ====================
+        function addLog(message, type = 'info') {
+            const logBox = document.getElementById('log-box');
+            if (!logBox) return;
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type === 'error' ? 'log-error' : type === 'success' ? 'log-success' : ''}`;
+            entry.innerText = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logBox.appendChild(entry);
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        // ==================== 健康檢查 ====================
+        async function checkHealth() {
+            const statusEl = document.getElementById('model-status');
+            if (!statusEl) return;
+            try {
+                const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(5000) });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                statusEl.innerText = "✅ 就緒";
+                statusEl.style.color = "#22c55e";
+                const modelEl = document.getElementById('model-name');
+                const gpuEl = document.getElementById('gpu-memory');
+                if (modelEl) modelEl.innerText = data.model?.split('/').pop() || "Qwen3.5-9B-Base";
+                if (gpuEl) gpuEl.innerText = data.gpu_memory?.allocated || "N/A";
+                addLog("健康檢查通過", "success");
+            } catch (e) {
+                if (statusEl) { statusEl.innerText = "❌ 離線"; statusEl.style.color = "#ef4444"; }
+                addLog(`健康檢查失敗：${e.message}`, "error");
+            }
+        }
+
+        // ==================== 發送消息 ====================
+        async function sendMessage() {
+            const inputEl = document.getElementById('user-input');
+            const sendBtn = document.getElementById('send-btn');
+            if (!inputEl || !sendBtn) return;
+            const userText = inputEl.value.trim();
+            if (!userText) return;
+
+            inputEl.value = ''; inputEl.disabled = true; sendBtn.disabled = true; sendBtn.innerText = "生成中...";
+            addMessageToUI('user', userText);
+            conversationHistory.push({ role: 'user', content: userText });
+
+            const systemPrompt = document.getElementById('system-prompt')?.value.trim();
+            let messagesPayload = systemPrompt ? [{ role: 'system', content: systemPrompt }] : [];
+            messagesPayload = [...messagesPayload, ...conversationHistory];
+
+            const aiMessageEl = addMessageToUI('ai', '<span class="loading-dots">思考中</span>');
+            const thinkBlock = aiMessageEl?.querySelector('.think-block');
+            const contentBlock = aiMessageEl?.querySelector('.content');
+
+            try {
+                addLog(`發送請求 (歷史: ${conversationHistory.length} 條)`);
+                const startTime = performance.now();
+                
+                const response = await fetch(CHAT_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        messages: messagesPayload,
+                        model: "Qwen3.5-9B-Base",
+                        session_id: SESSION_ID,
+                        enable_external_memory: true,
+                        max_tokens: parseInt(document.getElementById('max_tokens')?.value || "2048"),
+                        temperature: parseFloat(document.getElementById('temperature')?.value || "0.7"),
+                        top_p: parseFloat(document.getElementById('top_p')?.value || "0.9"),
+                        repetition_penalty: parseFloat(document.getElementById('repetition_penalty')?.value || "1.15"),
+                        stream: false
+                    })
+                });
+
+                if (!response.ok) throw new Error(`API 錯誤 (${response.status}): ${await response.text()}`);
+
+                const data = await response.json();
+                const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+                const tokens = data.usage?.completion_tokens || 0;
+                addLog(`生成完成 - 耗時：${elapsed}s, Tokens: ${tokens}`, "success");
+
+                let raw = data.choices[0]?.message?.content || "";
+                let think = "", answer = raw;
+                const m = raw.match(/<think>([\s\S]*?)<\/think>/);
+                if (m) { think = m[1].trim(); answer = raw.replace(/<think>[\s\S]*?<\/think>/, '').trim(); }
+                
+                if (thinkBlock && think) { thinkBlock.style.display = 'block'; thinkBlock.innerHTML = `<div class="think-title">💭 思考</div>${think.replace(/\n/g,'<br>')}`; }
+                if (contentBlock) contentBlock.innerHTML = answer.replace(/\n/g, '<br>');
+                
+                conversationHistory.push({ role: 'assistant', content: answer });
+
+            } catch (error) {
+                addLog(`請求失敗：${error.message}`, "error");
+                if (contentBlock) contentBlock.innerHTML = `<span style="color:#ef4444">❌ ${error.message}</span>`;
+                conversationHistory.pop();
+            } finally {
+                inputEl.disabled = false; sendBtn.disabled = false; sendBtn.innerText = "發送"; inputEl.focus();
+            }
+        }
+
+        // ==================== UI 輔助 ====================
+        function addMessageToUI(role, content) {
+            const container = document.getElementById('chat-container');
+            if (!container) return null;
+            const msg = document.createElement('div');
+            msg.className = `message ${role}`;
+            msg.innerHTML = role === 'ai' 
+                ? `<div class="think-block" style="display:none;"></div><div class="content">${content}</div>`
+                : `<div class="content">${content}</div>`;
+            container.appendChild(msg);
+            container.scrollTop = container.scrollHeight;
+            return msg;
+        }
+
+        function clearChat() {
+            conversationHistory = [];
+            const c = document.getElementById('chat-container');
+            if (c) c.innerHTML = `<div class="message ai"><div class="think-block" style="display:none;"></div><div class="content">對話已清除 ✨</div></div>`;
+            addLog("對話已清除");
+        }
+
+        // ==================== 初始化 ====================
+        window.onload = () => { addLog("初始化完成"); checkHealth(); setInterval(checkHealth, 30000); };
+    </script>
+</body>
+</html>

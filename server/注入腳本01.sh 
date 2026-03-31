@@ -1,0 +1,120 @@
+#!/bin/bash
+# 🌸 靈溪後端 - 外部記憶注入腳本（自動掃描 *.md 版，支援分類）
+clear
+cd /mnt/e/AI/models/Qwen3.5-9B-Base/server
+
+echo "═══════════════════════════════════════"
+echo "📚 OpenClaw 外部記憶注入（自動掃描 + 分類）"
+echo "═══════════════════════════════════════"
+
+# 🔹 進入虛擬環境
+echo "🔹 激活虛擬環境..."
+source .env/bin/activate
+
+# 🔹 配置
+BASE_URL="http://localhost:8000"
+SESSION_ID="openclaw_sys_global"
+WORKSPACE="/mnt/d/workspace"
+
+# 🔹 排除目錄（避免注入無關檔案）
+EXCLUDE_DIRS=(".git" "node_modules" ".openclaw" "__pycache__" ".venv" "venv" ".env")
+
+echo "📡 目標：$BASE_URL/memory/add"
+echo "📁 來源：$WORKSPACE"
+echo "🔖 會話 ID：$SESSION_ID"
+echo ""
+
+# 🔹 自動掃描 *.md 檔案（遞迴 + 排除）
+mapfile -t MD_FILES < <(find "$WORKSPACE" -type f -name "*.md" \
+  $(for dir in "${EXCLUDE_DIRS[@]}"; do echo "-not -path '*/$dir/*'"; done) \
+  | sort)
+
+TOTAL=${#MD_FILES[@]}
+echo "🔍 找到 $TOTAL 個 .md 檔案，開始注入..."
+echo ""
+
+# 🔹 逐個注入
+COUNT=0
+for filepath in "${MD_FILES[@]}"; do
+    COUNT=$((COUNT + 1))
+    rel_path="${filepath#$WORKSPACE/}"
+    echo "🔹 [$COUNT/$TOTAL] 注入 $rel_path..."
+    
+    python3 << PYEOF
+import json
+import requests
+import sys
+import re
+
+filepath = "$filepath"
+session_id = "$SESSION_ID"
+base_url = "$BASE_URL"
+
+def infer_category(filepath):
+    """根據檔案路徑推測類別"""
+    path_lower = filepath.lower()
+    if any(kw in path_lower for kw in ["code", "src", "py", "js", "java", "cpp", "c++", "go", "rust"]):
+        return "code"
+    elif any(kw in path_lower for kw in ["doc", "docs", "readme", "spec", "manual", "guide", "文檔"]):
+        return "documentation"
+    elif any(kw in path_lower for kw in ["qa", "faq", "q&a", "問題", "問答"]):
+        return "qa"
+    else:
+        return "general"
+
+try:
+    with open(filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    if not content.strip():
+        print(f"   ⚠️  檔案為空，跳過")
+        sys.exit(0)
+    
+    category = infer_category(filepath)
+    
+    payload = {
+        "session_id": session_id,
+        "content": content,
+        "chunk_size": 3000,
+        "category": category
+    }
+    
+    resp = requests.post(f"{base_url}/memory/add", json=payload, timeout=120)
+    if resp.status_code == 200:
+        result = resp.json()
+        print(f"   ✅ 狀態：{resp.status_code}, 類別：{category}, chunks 新增：{result.get('chunks_added', 'N/A')}")
+    else:
+        print(f"   ❌ HTTP {resp.status_code}: {resp.text[:200]}")
+except FileNotFoundError:
+    print(f"   ❌ 檔案不存在：{filepath}")
+except requests.exceptions.Timeout:
+    print(f"   ❌ 請求超時（120 秒）")
+except Exception as e:
+    print(f"   ❌ 錯誤：{type(e).__name__}: {str(e)[:150]}")
+PYEOF
+    
+    sleep 1  # 避免請求過快觸發限流
+done
+
+echo ""
+echo "═══════════════════════════════════════"
+echo "✅ 注入完成！共處理 $COUNT 個檔案"
+echo "═══════════════════════════════════════"
+
+# 🔹 驗證結果
+echo ""
+echo "🔍 驗證注入結果："
+curl -s http://localhost:8000/health | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    em = d.get('external_memory', {})
+    print(f'📚 外部記憶：{em.get(\"sessions\", 0)} 個會話，{em.get(\"total_chunks\", 0)} 個 chunks')
+except Exception as e:
+    print(f'❌ 解析失敗：{e}')
+"
+
+# 🔹 額外顯示分類統計（可選）
+echo ""
+echo "📊 分類統計："
+curl -s http://localhost:8000/memory/categories | python3 -m json.tool 2>/dev/null || echo "無法獲取分類統計（API 可能未就緒）"
