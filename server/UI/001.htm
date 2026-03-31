@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>雲霓幻夢｜AI 對話系統</title>
+    <link rel="stylesheet" href="css/orange.css">
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>雲霓幻夢：AI 對話系統</h1>
+        <div class="subtitle">技術不只是工具，而是詩意的延伸</div>
+    </header>
+    <div class="main-layout">
+        <div class="left-panel">
+            <div class="chat-area" id="chat-area"></div>
+            <div class="input-wrapper">
+                <textarea id="user-input" rows="2" placeholder="輸入訊息... (Enter 發送，Shift+Enter 換行)"></textarea>
+                <div class="button-group">
+                    <button id="send-btn">發送</button>
+                    <button id="clear-btn">清除對話</button>
+                </div>
+            </div>
+        </div>
+        <div class="right-panel">
+            <div class="think-box">
+                <div class="section-title">🧠 系統狀態</div>
+                <div class="think-content" id="system-status">
+                    <div class="resource-item"><span>🔌 API 狀態</span><span id="api-status">檢測中...</span></div>
+                    <div class="resource-item"><span>🖥️ 運算設備</span><span id="device">-</span></div>
+                    <div class="resource-item"><span>💾 顯存使用</span><span id="vram">-</span></div>
+                    <div class="resource-item"><span>🤖 模型型號</span><span>Qwen3.5-9B-Base (4-bit)</span></div>
+                </div>
+            </div>
+            <div class="info-box">
+                <div class="section-title">📊 對話統計</div>
+                <div class="info-panel">
+                    <div class="resource-item"><span>💬 對話輪數</span><span id="message-count">0</span></div>
+                    <div class="resource-item"><span>📝 總字元數</span><span id="total-chars">0</span></div>
+                    <div class="resource-item"><span>⚡ 最後回應時間</span><span id="last-response-time">-</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <footer>© 2026 雲霓幻夢 | AI 驅動的對話體驗</footer>
+</div>
+
+<script>
+    // ========== 配置 ==========
+    const API_BASE = "http://localhost:8000";
+    const API_URL = `${API_BASE}/v1/chat/completions`;
+    const SESSION_ID = "web_chat_001";
+    
+    // 🔹 狀態管理（防止重複發送）
+    let messages = [];
+    let isSending = false;
+    let isInitialized = false;
+    let currentLoadingMessage = null;
+    
+    // DOM 元素
+    let chatArea, userInput, sendBtn, clearBtn;
+    
+    // 統計
+    let stats = { messageCount: 0, totalChars: 0, lastResponseTime: null };
+    
+    // ========== 初始化（只執行一次）==========
+    function init() {
+        if (isInitialized) {
+            console.log('⚠️ 已初始化，跳過');
+            return;
+        }
+        
+        chatArea = document.getElementById('chat-area');
+        userInput = document.getElementById('user-input');
+        sendBtn = document.getElementById('send-btn');
+        clearBtn = document.getElementById('clear-btn');
+        
+        if (!chatArea || !userInput || !sendBtn) {
+            console.error('❌ 關鍵 DOM 元素遺失');
+            return;
+        }
+        
+        // 🔹 綁定事件（確保只綁定一次）
+        sendBtn.addEventListener('click', sendMessage);
+        clearBtn.addEventListener('click', clearConversation);
+        userInput.addEventListener('keydown', handleKeydown);
+        userInput.addEventListener('input', autoResizeTextarea);
+        
+        isInitialized = true;
+        console.log('✅ 前端初始化完成');
+        
+        checkAPIStatus();
+        addWelcomeMessage();
+        startMetricsPolling();
+        autoResizeTextarea();
+    }
+    
+    // ========== 發送消息（核心邏輯）==========
+    async function sendMessage() {
+        // 🔹 嚴格檢查鎖
+        if (isSending) {
+            console.log('⚠️ 正在發送中，請稍候');
+            return;
+        }
+        
+        const text = userInput.value.trim();
+        if (!text) return;
+        
+        // 🔹 立即鎖定
+        isSending = true;
+        sendBtn.disabled = true;
+        sendBtn.innerText = "發送中...";
+        
+        // 🔹 清空輸入框（避免重複讀取）
+        userInput.value = '';
+        autoResizeTextarea();
+        
+        // 🔹 添加用戶訊息
+        addMessageToUI('user', text, true);
+        showLoading();
+        
+        const startTime = Date.now();
+        
+        try {
+            const historyForAPI = messages.slice(-10).map(m => ({
+                role: m.role,
+                content: m.content
+            }));
+            
+            console.log('📤 發送請求:', { text: text.substring(0, 20) + '...', historyLength: historyForAPI.length });
+            
+            const response = await fetch(API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    messages: historyForAPI,
+                    model: "Qwen3.5-9B-Base",
+                    session_id: SESSION_ID,
+                    enable_external_memory: true,
+                    max_tokens: 1024,
+                    temperature: 0.7,
+                    top_p: 0.9,
+                    stream: false
+                })
+            });
+            
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.detail || `API 錯誤：${response.status}`);
+            }
+            
+            const data = await response.json();
+            const reply = data.choices[0]?.message?.content || "（無回應）";
+            
+            hideLoading();
+            addMessageToUI('assistant', reply, true);
+            
+            const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
+            stats.lastResponseTime = elapsedTime;
+            document.getElementById('last-response-time').textContent = `${elapsedTime} 秒`;
+            
+        } catch (error) {
+            console.error('❌ 發送失敗:', error);
+            hideLoading();
+            addMessageToUI('assistant', `❌ 錯誤：${error.message}`, false);
+        } finally {
+            // 🔹 無論成功失敗，都必須解鎖
+            isSending = false;
+            sendBtn.disabled = false;
+            sendBtn.innerText = "發送";
+            userInput.focus();
+            console.log('🔓 發送鎖已釋放');
+        }
+    }
+    
+    // ========== UI 輔助函數 ==========
+    function addMessageToUI(role, content, saveToHistory = true) {
+        if (!chatArea) return;
+        const msgDiv = document.createElement('div');
+        msgDiv.className = `message ${role === 'user' ? 'user-message' : 'assistant-message'}`;
+        if (content.includes('```')) {
+            content = content.replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+            msgDiv.innerHTML = content;
+        } else {
+            msgDiv.textContent = content;
+        }
+        chatArea.appendChild(msgDiv);
+        scrollToBottom();
+        if (saveToHistory) {
+            messages.push({ role: role, content: content });
+            updateStats(role, content);
+        }
+        return msgDiv;
+    }
+    
+    function showLoading() {
+        if (currentLoadingMessage) return;
+        const loadingDiv = document.createElement('div');
+        loadingDiv.className = 'message-loading';
+        loadingDiv.innerHTML = '<div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div>';
+        loadingDiv.id = 'loading-message';
+        chatArea.appendChild(loadingDiv);
+        scrollToBottom();
+        currentLoadingMessage = loadingDiv;
+    }
+    
+    function hideLoading() {
+        if (currentLoadingMessage) {
+            currentLoadingMessage.remove();
+            currentLoadingMessage = null;
+        }
+    }
+    
+    function scrollToBottom() {
+        if (chatArea) chatArea.scrollTop = chatArea.scrollHeight;
+    }
+    
+    function updateStats(role, content) {
+        if (role === 'user') {
+            stats.messageCount++;
+            stats.totalChars += content.length;
+            document.getElementById('message-count').textContent = stats.messageCount;
+            document.getElementById('total-chars').textContent = stats.totalChars;
+        }
+    }
+    
+    function autoResizeTextarea() {
+        if (!userInput) return;
+        userInput.style.height = 'auto';
+        userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
+    }
+    
+    function handleKeydown(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    }
+    
+    function addWelcomeMessage() {
+        addMessageToUI('assistant', '✨ 歡迎使用雲霓幻夢！輸入您的問題，我將為您解答。', true);
+    }
+    
+    function clearConversation() {
+        messages = [];
+        if (chatArea) chatArea.innerHTML = '';
+        stats = { messageCount: 0, totalChars: 0, lastResponseTime: null };
+        document.getElementById('message-count').textContent = '0';
+        document.getElementById('total-chars').textContent = '0';
+        document.getElementById('last-response-time').textContent = '-';
+        addWelcomeMessage();
+        scrollToBottom();
+    }
+    
+    // ========== 後端狀態監控 ==========
+    async function checkAPIStatus() {
+        const statusElement = document.getElementById('api-status');
+        if (!statusElement) return;
+        try {
+            const response = await fetch(`${API_BASE}/health`);
+            if (response.ok) {
+                const data = await response.json();
+                statusElement.innerHTML = '<span class="status-badge status-online"></span>線上';
+                document.getElementById('device').textContent = data.device === 'cuda' ? 'GPU (CUDA)' : 'CPU';
+                if (data.gpu_memory) {
+                    document.getElementById('vram').textContent = data.gpu_memory;
+                }
+            } else {
+                throw new Error('API 不可用');
+            }
+        } catch (error) {
+            statusElement.innerHTML = '<span class="status-badge status-offline"></span>離線';
+            document.getElementById('device').textContent = '無法連接';
+        }
+    }
+    
+    function startMetricsPolling() {
+        setInterval(async () => {
+            try {
+                const response = await fetch(`${API_BASE}/health`);
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.gpu_memory) {
+                        document.getElementById('vram').textContent = data.gpu_memory;
+                    }
+                }
+            } catch (error) { /* 靜默失敗 */ }
+        }, 5000);
+    }
+    
+    // ========== 啟動（確保只調用一次）==========
+    window.onload = init;
+</script>
+</body>
+</html>

@@ -22,6 +22,26 @@
 
 ---
 
+## 路徑規劃
+
+/mnt/e/AI/models/Qwen3.5-9B-Base/
+├── server/                          # ← 主要工作目錄
+│   ├── backend01.py                # ✅ 後端主程式
+│   ├── env-qwen3.5-9b01.sh         # ✅ 啟動腳本
+│   ├── 注入腳本01.sh               # ✅ RAG注入工具
+│   ├── 9b.log                      # 📝 日誌檔案（自動生成）
+│   ├── external_memory.json        # 💾 記憶資料庫（自動生成）
+│   ├── index_rag.json              # 📋 檢索表（自動生成）
+│   ├── error_cases.json            # ⚠️ 錯誤案例（自動生成）
+│   ├── .env/                       # 🐍 Python虛擬環境（自動創建）
+│   └── UI/                         # 🎨 前端頁面目錄
+│       ├── 001.html               # 對話介面
+│       └── 002.html               # 監控介面
+│
+└── README.md                        # 📖 專案說明文件
+
+---
+
 ## 🖥️ 硬體要求
 
 | 元件 | 最低要求 | 建議配置 | 備註 |
